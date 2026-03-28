@@ -1,14 +1,32 @@
 {
     "run": {
-        "count": 10
+        "count": 10,
+        "max_workers": 10,
+        "timeout_sec": 180,
+        "max_retries": 3,
+        "startup_delay_min_sec": 2,
+        "startup_delay_max_sec": 8,
+        "retry_wait_min_sec": 10,
+        "retry_wait_max_sec": 30,
+        "stats_every": 10,
+        "progress_every": 50,
+        "job_timeout_grace_sec": 20,
+        "cleanup_timeout_sec": 5,
+        "remote_push_batch_size": 10,
+        "output_mode": "sso",
+        "signup_url": "https://accounts.x.ai/sign-up?redirect=grok-com"
     },
+    "email_provider": "domainmail",
     "duckmail_api_base": "https://api.duckmail.sbs",
     "duckmail_bearer": "<your_duckmail_bearer_token>",
+    "domainmail_api_base": "<your_domainmail_api_base>",
+    "domainmail_token": "<your_domainmail_token>",
+    "domainmail_domain": "<your_domainmail_domain>",
     "proxy": "",
     "browser_proxy": "",
     "api": {
-        "endpoint": "",
-        "token": "",
+        "endpoint": "<your_api_endpoint>",
+        "token": "<your_api_token>",
         "append": true
     }
 }

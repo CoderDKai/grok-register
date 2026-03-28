@@ -20,7 +20,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ============================================================
-# DuckMail 配置（从 config.json 加载）
+# 邮箱服务配置（从 config.json 加载）
 # ============================================================
 
 _config_path = Path(__file__).parent / "config.json"
@@ -29,8 +29,12 @@ if _config_path.exists():
     with _config_path.open("r", encoding="utf-8") as _f:
         _conf = json.load(_f)
 
+EMAIL_PROVIDER = str(_conf.get("email_provider", "duckmail") or "duckmail").strip().lower()
 DUCKMAIL_API_BASE = str(_conf.get("duckmail_api_base", "https://api.duckmail.sbs"))
 DUCKMAIL_BEARER = str(_conf.get("duckmail_bearer", ""))
+DOMAINMAIL_API_BASE = str(_conf.get("domainmail_api_base", "")).rstrip("/")
+DOMAINMAIL_TOKEN = str(_conf.get("domainmail_token", ""))
+DOMAINMAIL_DOMAIN = str(_conf.get("domainmail_domain", "410883.xyz"))
 PROXY = str(_conf.get("proxy", ""))
 
 # ============================================================
@@ -42,7 +46,7 @@ _temp_email_cache: Dict[str, str] = {}
 
 def get_email_and_token() -> Tuple[Optional[str], Optional[str]]:
     """
-    创建 DuckMail 临时邮箱并返回 (email, mail_token)。
+    创建临时邮箱并返回 (email, mail_token)。
     供 DrissionPage_example.py 调用。
     """
     email, _password, mail_token = create_temp_email()
@@ -54,7 +58,7 @@ def get_email_and_token() -> Tuple[Optional[str], Optional[str]]:
 
 def get_oai_code(dev_token: str, email: str, timeout: int = 30) -> Optional[str]:
     """
-    轮询 DuckMail 获取 OTP 验证码。
+    轮询邮箱服务获取 OTP 验证码。
     供 DrissionPage_example.py 调用。
 
     Returns:
@@ -67,8 +71,51 @@ def get_oai_code(dev_token: str, email: str, timeout: int = 30) -> Optional[str]
 
 
 # ============================================================
-# DuckMail 核心函数
+# 邮箱服务核心函数
 # ============================================================
+
+def _generate_email_local(length: int | None = None) -> str:
+    chars = string.ascii_lowercase + string.digits
+    actual_length = length or random.randint(8, 13)
+    return "".join(random.choice(chars) for _ in range(actual_length))
+
+
+def _domainmail_headers() -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {DOMAINMAIL_TOKEN}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    }
+
+
+def _domainmail_request(method: str, path: str, **kwargs):
+    if not DOMAINMAIL_API_BASE:
+        raise Exception("domainmail_api_base 未设置")
+    if not DOMAINMAIL_TOKEN:
+        raise Exception("domainmail_token 未设置")
+
+    url = f"{DOMAINMAIL_API_BASE}{path}"
+    headers = kwargs.pop("headers", {})
+    merged_headers = _domainmail_headers()
+    merged_headers.update(headers)
+    timeout = kwargs.pop("timeout", 20)
+    return requests.request(method, url, headers=merged_headers, timeout=timeout, **kwargs)
+
+
+def _create_domainmail_email() -> Tuple[str, str, str]:
+    domain = DOMAINMAIL_DOMAIN.strip()
+    if not domain:
+        raise Exception("domainmail_domain 未设置")
+
+    email = f"{_generate_email_local()}@{domain}"
+    res = _domainmail_request("get", f"/mailboxes/{email}/emails", params={"page": 1, "limit": 1}, timeout=20)
+    if res.status_code != 200:
+        raise Exception(f"探测邮箱失败: {res.status_code} - {res.text[:200]}")
+
+    print(f"[*] DomainMail 临时邮箱就绪: {email}")
+    return email, "", email
+
 
 def _create_duckmail_session():
     """创建 DuckMail 请求会话（优先 curl_cffi 绕 TLS 指纹）"""
@@ -122,13 +169,14 @@ def _generate_password(length=14):
 
 
 def create_temp_email() -> Tuple[str, str, str]:
-    """创建 DuckMail 临时邮箱，返回 (email, password, mail_token)"""
+    """创建临时邮箱，返回 (email, password, mail_token)"""
+    if EMAIL_PROVIDER == "domainmail":
+        return _create_domainmail_email()
+
     if not DUCKMAIL_BEARER:
         raise Exception("duckmail_bearer 未设置，无法创建临时邮箱")
 
-    chars = string.ascii_lowercase + string.digits
-    length = random.randint(8, 13)
-    email_local = "".join(random.choice(chars) for _ in range(length))
+    email_local = _generate_email_local()
     email = f"{email_local}@duckmail.sbs"
     password = _generate_password()
 
@@ -141,7 +189,7 @@ def create_temp_email() -> Tuple[str, str, str]:
         res = _do_request(session, use_cffi, "post",
                           f"{api_base}/accounts",
                           json={"address": email, "password": password},
-                          headers=bearer_headers, timeout=15)
+                          headers=bearer_headers, timeout=60)
         if res.status_code not in (200, 201):
             raise Exception(f"创建邮箱失败: {res.status_code} - {res.text[:200]}")
 
@@ -150,7 +198,7 @@ def create_temp_email() -> Tuple[str, str, str]:
         token_res = _do_request(session, use_cffi, "post",
                                 f"{api_base}/token",
                                 json={"address": email, "password": password},
-                                timeout=15)
+                                timeout=60)
         if token_res.status_code == 200:
             mail_token = token_res.json().get("token")
             if mail_token:
@@ -163,7 +211,22 @@ def create_temp_email() -> Tuple[str, str, str]:
 
 
 def fetch_emails(mail_token: str) -> List[Dict[str, Any]]:
-    """获取 DuckMail 邮件列表"""
+    """获取邮件列表"""
+    if EMAIL_PROVIDER == "domainmail":
+        try:
+            res = _domainmail_request(
+                "get",
+                f"/mailboxes/{mail_token}/emails",
+                params={"page": 1, "limit": 20},
+                timeout=20,
+            )
+            if res.status_code == 200:
+                data = res.json()
+                return data.get("data") or []
+        except Exception:
+            pass
+        return []
+
     try:
         api_base = DUCKMAIL_API_BASE.rstrip("/")
         headers = {"Authorization": f"Bearer {mail_token}"}
@@ -180,7 +243,16 @@ def fetch_emails(mail_token: str) -> List[Dict[str, Any]]:
 
 
 def fetch_email_detail(mail_token: str, msg_id: str) -> Optional[Dict]:
-    """获取 DuckMail 单封邮件详情"""
+    """获取单封邮件详情"""
+    if EMAIL_PROVIDER == "domainmail":
+        try:
+            res = _domainmail_request("get", f"/emails/{msg_id}", timeout=20)
+            if res.status_code == 200:
+                return res.json()
+        except Exception:
+            pass
+        return None
+
     try:
         api_base = DUCKMAIL_API_BASE.rstrip("/")
         headers = {"Authorization": f"Bearer {mail_token}"}
@@ -200,7 +272,7 @@ def fetch_email_detail(mail_token: str, msg_id: str) -> Optional[Dict]:
 
 
 def wait_for_verification_code(mail_token: str, timeout: int = 120) -> Optional[str]:
-    """轮询 DuckMail 等待验证码邮件"""
+    """轮询邮箱服务等待验证码邮件"""
     start = time.time()
     seen_ids = set()
 
@@ -216,10 +288,20 @@ def wait_for_verification_code(mail_token: str, timeout: int = 120) -> Optional[
 
             detail = fetch_email_detail(mail_token, str(msg_id))
             if detail:
-                content = detail.get("text") or detail.get("html") or ""
+                content = (
+                    detail.get("text")
+                    or detail.get("html")
+                    or detail.get("textBody")
+                    or detail.get("htmlBody")
+                    or msg.get("bodyPreview")
+                    or msg.get("snippet")
+                    or detail.get("subject")
+                    or ""
+                )
                 code = extract_verification_code(content)
                 if code:
-                    print(f"[*] 从 DuckMail 提取到验证码: {code}")
+                    provider_name = "DomainMail" if EMAIL_PROVIDER == "domainmail" else "DuckMail"
+                    print(f"[*] 从 {provider_name} 提取到验证码: {code}")
                     return code
         time.sleep(3)
     return None
